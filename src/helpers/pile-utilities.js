@@ -1022,13 +1022,19 @@ export function getPriceArray(totalCost, currencies) {
 	const allCommonExchangeRate = new Set(primaryCurrencies.map(currency => currency.exchangeRate));
 
 	if (primaryCurrencies.length === 1 || allCommonExchangeRate.size === 1) {
-		return [{
-			...primaryCurrency,
-			cost: totalCost,
-			baseCost: totalCost,
-			maxCurrencyCost: totalCost,
-			string: primaryCurrency.abbreviation.replace('{#}', totalCost)
-		}]
+		// The whole cost goes to the primary currency, but the other currencies are still included (at no cost) so that
+		// payments can fall back on them when the buyer does not have enough of the primary currency
+		return [primaryCurrency, ...primaryCurrencies.filter(currency => currency !== primaryCurrency)].map(currency => {
+			const isPrimary = currency === primaryCurrency;
+			const cost = isPrimary ? totalCost : 0;
+			return {
+				...currency,
+				cost: cost,
+				baseCost: cost,
+				maxCurrencyCost: isPrimary ? totalCost : Math.ceil(totalCost / currency.exchangeRate),
+				string: currency.abbreviation.replace('{#}', cost)
+			}
+		});
 	}
 
 	const smallestExchangeRate = getSmallestExchangeRate(currencies);
@@ -1871,6 +1877,8 @@ export function getPaymentData({
 
 			while (priceLeft > 0) {
 
+				let spentCurrency = false;
+
 				// We then need to loop through each price, and check if we have any more left over
 				for (const buyerPrice of paymentData.finalPrices) {
 
@@ -1880,11 +1888,27 @@ export function getPaymentData({
 
 					// Otherwise, add enough to cover the remaining cost
 					const newQuantity = Math.ceil(Math.min(buyerCurrencyQuantity, priceLeft / buyerPrice.exchangeRate));
+					if (!newQuantity) continue;
 					buyerPrice.quantity += newQuantity;
+					spentCurrency = true;
 					priceLeft = Helpers.roundToDecimals(priceLeft - (newQuantity * buyerPrice.exchangeRate), decimals);
 
 					if (priceLeft <= 0) break;
 
+				}
+
+				// If the buyer has nothing left to pay with, looping again would never finish
+				if (priceLeft > 0 && !spentCurrency) {
+					const reason = (buyer === merchant ? "TheyCantAfford" : "YouCantAfford");
+					paymentData.canBuy = false;
+					paymentData.reasons.push([`ITEM-PILES.Applications.TradeMerchantItem.${reason}`]);
+					paymentData.finalPrices = getPriceArray(paymentData.totalCurrencyCost)
+						.filter(currency => !currency.secondary)
+						.concat(paymentData.otherPrices);
+					return {
+						...paymentData,
+						sellerReceive: paymentData.finalPrices,
+					};
 				}
 
 				if (priceLeft > 0) {
